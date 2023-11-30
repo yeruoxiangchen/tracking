@@ -691,25 +691,43 @@ public:
 			Point2f qt = dirLine->xstart + dirLine->xdir * cp.x;
 			Point3f q(qt.x, qt.y, 1);//转齐次
 			Point3f Q(z * (q.x - cx) / fx, z * (q.y - cy) / fy, z);
+
 			//Q = P;
 			Point3f PQ = P - Q;
 			float w = 1 / (pow(fabs((P - Q).x), 2 - alpha) + pow(fabs((P - Q).y), 2 - alpha) + 1e-3);
 			w *= (cp.w * cp.w);
-
+			w = 1;
+			Point3f Xx = vcp[i].center;
 			float* _b = b.ptr<float>(irow);
 			_b[0] = w * (Q.x - P.x);
 			float* a = A.ptr<float>(irow++);
-			a[0] = 0; a[1] = w * P.z; a[2] = -w * P.y; a[3] = w; a[4] = 0; a[5] = 0;
+			//a[0] = 0; a[1] = w * Xx.z; a[2] = -w * Xx.y; a[3] = w; a[4] = 0; a[5] = 0;
+			a[0] = R(0, 2) * Xx.y - R(0, 1) * Xx.z;
+			a[1] = R(0, 0) * Xx.z - R(0, 2) * Xx.x;
+			a[2] = R(0, 1) * Xx.x - R(0, 0) * Xx.y;
+			a[3] = R(0, 0);
+			a[4] = R(0, 1);
+			a[5] = R(0, 2);
 			_b = b.ptr<float>(irow);
 			_b[0] = w * (Q.y - P.y);
 			a = A.ptr<float>(irow++);
-			a[0] = -w * P.z; a[1] = 0; a[2] = w * P.x; a[3] = 0; a[4] = w; a[5] = 0;
-
+			//a[0] = -w * Xx.z; a[1] = 0; a[2] = w * Xx.x; a[3] = 0; a[4] = w; a[5] = 0;
+			a[0] = R(1, 2) * Xx.y - R(1, 1) * Xx.z;
+			a[1] = R(1, 0) * Xx.z - R(1, 2) * Xx.x;
+			a[2] = R(1, 1) * Xx.x - R(1, 0) * Xx.y;
+			a[3] = R(1, 0);
+			a[4] = R(1, 1);
+			a[5] = R(1, 2);
 			_b = b.ptr<float>(irow);
 			_b[0] = w * (z - P.z);//q.z=z=p.z
 			a = A.ptr<float>(irow++);
-			a[0] = w * P.y; a[1] = -w * P.x; a[2] = 0; a[3] = 0; a[4] = 0; a[5] = w;
-
+			//a[0] = w * Xx.y; a[1] = -w * Xx.x; a[2] = 0; a[3] = 0; a[4] = 0; a[5] = w;
+			a[0] = R(2, 2) * Xx.y - R(2, 1) * Xx.z;
+			a[1] = R(2, 0) * Xx.z - R(2, 2) * Xx.x;
+			a[2] = R(2, 1) * Xx.x - R(2, 0) * Xx.y;
+			a[3] = R(2, 0);
+			a[4] = R(2, 1);
+			a[5] = R(2, 2);
 		}
 
 		A = A(Rect(0, 0, 6, irow)).clone();
@@ -754,6 +772,8 @@ public:
 			// 更新旋转矩阵和平移向量
 			R = Matx33f(R_) * R;
 			t = Matx33f(R_) * t + t_;
+			/*R =  R * Matx33f(R_);
+			t = R * t_;*/
 			pose.R = R;
 			pose.t = t;
 			float diff = p_.dot(p_);
@@ -1204,9 +1224,9 @@ public:
 		_prev = _cur;
 		_cur.img = img;
 		_cur.colorProb = _colorHistogram.getProb(_cur.img);
-		Mat foreground = imread("D:/RBOT_dataset/ape/mask" + ff::StrFormat("/%06d-mask.png", fi), IMREAD_GRAYSCALE);
+		/*Mat foreground = imread("D:/RBOT_dataset/ape/mask" + ff::StrFormat("/%06d-mask.png", fi), IMREAD_GRAYSCALE);
 		foreground.convertTo(foreground, CV_32F, 1 / 255.0);
-		_cur.colorProb = foreground;
+		_cur.colorProb = foreground;*/
 	}
 
 	template<typename _GetValT>
