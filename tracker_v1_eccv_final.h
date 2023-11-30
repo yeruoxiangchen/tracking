@@ -646,7 +646,7 @@ public:
 		return err / nerr;
 	}
 
-	int _update(PoseData& pose, const Matx33f& K, const std::vector<CPoint>& cpoints, float alpha, float eps)
+	int _update(PoseData& pose, const Matx33f& K, const std::vector<CPoint>& cpoints, float alpha, float eps, float mu, float v, bool isinit)
 	{
 		Matx33f R = pose.R;
 		Point3f t = pose.t;
@@ -657,135 +657,166 @@ public:
 		++g_totalUpdates;
 
 		const float fx = K(0, 0), fy = K(1, 1);
-		const float cx = K(0, 2), cy = K(1, 2);
+
 		auto* vcp = &cpoints[0];
 		int npt = (int)cpoints.size();
 
-		//构建线性方程组
-		Mat1f A(npt * 3, 6);
-		Mat1f b(npt * 3, 1);
-		int irow = 0;
+		float E_x = 0.f;
+		float E_deltax = 0.f;
+		float f_x = 0.f;
+		float f_deltx = 0.f;
+		float E_diff = 0.f;
+		float L_diff = 0.f;
+		float ρ = 0.f;
+
+		Matx66f JJ = Matx66f::zeros();
+		Vec6f J(0, 0, 0, 0, 0, 0);
+
 		for (int i = 0; i < npt; ++i)
 		{
-			Point3f P = R * vcp[i].center + t;
-			Point3f p = K * P;
-
-			const int x = int(p.x / p.z + 0.5), y = int(p.y / p.z + 0.5);
-			const float z = p.z;
-			if (uint(x - _roi.x) >= uint(_roi.width) || uint(y - _roi.y) >= uint(_roi.height))
+			Point3f Q = R * vcp[i].center + t;
+			Point3f q = K * Q;
+			/*if (q.z == 0.f)
 				continue;
+			else*/
+			{
+				const int x = int(q.x / q.z + 0.5), y = int(q.y / q.z + 0.5);
+				if (uint(x - _roi.x) >= uint(_roi.width) || uint(y - _roi.y) >= uint(_roi.height))
+					continue;
 
-			Point3f pn = K * (R * vcp[i].normal + t);
-			Vec2f n(pn.x / pn.z - p.x / p.z, pn.y / pn.z - p.y / p.z);
-			n = normalize(n);
-			const float X = P.x, Y = P.y, Z = P.z;
-			Point2f pt(p.x / p.z, p.y / p.z);
-			auto* dd = this->getDirData(n);
-			if (!dd)
-				continue;
-			int cpi;
-			auto* dirLine = dd->getScanLine(pt, cpi);
-			if (!dirLine || cpi < 0)
-				continue;
-			auto& cp = dirLine->vPoints[cpi];
-			Point2f qt = dirLine->xstart + dirLine->xdir * cp.x;
-			Point3f q(qt.x, qt.y, 1);//转齐次
-			Point3f Q(z * (q.x - cx) / fx, z * (q.y - cy) / fy, z);
+				Point3f qn = K * (R * vcp[i].normal + t);
+				Vec2f n(qn.x / qn.z - q.x / q.z, qn.y / qn.z - q.y / q.z);
+				n = normalize(n);
 
-			//Q = P;
-			Point3f PQ = P - Q;
-			float w = 1 / (pow(fabs((P - Q).x), 2 - alpha) + pow(fabs((P - Q).y), 2 - alpha) + 1e-3);
-			w *= (cp.w * cp.w);
-			w = 1;
-			Point3f Xx = vcp[i].center;
-			float* _b = b.ptr<float>(irow);
-			_b[0] = w * (Q.x - P.x);
-			float* a = A.ptr<float>(irow++);
-			//a[0] = 0; a[1] = w * Xx.z; a[2] = -w * Xx.y; a[3] = w; a[4] = 0; a[5] = 0;
-			a[0] = R(0, 2) * Xx.y - R(0, 1) * Xx.z;
-			a[1] = R(0, 0) * Xx.z - R(0, 2) * Xx.x;
-			a[2] = R(0, 1) * Xx.x - R(0, 0) * Xx.y;
-			a[3] = R(0, 0);
-			a[4] = R(0, 1);
-			a[5] = R(0, 2);
-			_b = b.ptr<float>(irow);
-			_b[0] = w * (Q.y - P.y);
-			a = A.ptr<float>(irow++);
-			//a[0] = -w * Xx.z; a[1] = 0; a[2] = w * Xx.x; a[3] = 0; a[4] = w; a[5] = 0;
-			a[0] = R(1, 2) * Xx.y - R(1, 1) * Xx.z;
-			a[1] = R(1, 0) * Xx.z - R(1, 2) * Xx.x;
-			a[2] = R(1, 1) * Xx.x - R(1, 0) * Xx.y;
-			a[3] = R(1, 0);
-			a[4] = R(1, 1);
-			a[5] = R(1, 2);
-			_b = b.ptr<float>(irow);
-			_b[0] = w * (z - P.z);//q.z=z=p.z
-			a = A.ptr<float>(irow++);
-			//a[0] = w * Xx.y; a[1] = -w * Xx.x; a[2] = 0; a[3] = 0; a[4] = 0; a[5] = w;
-			a[0] = R(2, 2) * Xx.y - R(2, 1) * Xx.z;
-			a[1] = R(2, 0) * Xx.z - R(2, 2) * Xx.x;
-			a[2] = R(2, 1) * Xx.x - R(2, 0) * Xx.y;
-			a[3] = R(2, 0);
-			a[4] = R(2, 1);
-			a[5] = R(2, 2);
+				const float X = Q.x, Y = Q.y, Z = Q.z;
+				/*      |fx/Z   0   -fx*X/Z^2 |   |a  0   b|
+				dq/dQ = |                     | = |        |
+						|0    fy/Z  -fy*Y/Z^2 |   |0  c   d|
+				*/
+				const float a = fx / Z, b = -fx * X / (Z * Z), c = fy / Z, d = -fy * Y / (Z * Z);
+
+				Point2f pt(q.x / q.z, q.y / q.z);
+
+				auto* dd = this->getDirData(n);
+				if (!dd)
+					continue;
+				int cpi;
+				auto* dirLine = dd->getScanLine(pt, cpi);
+				if (!dirLine || cpi < 0)
+					continue;
+
+				auto& cp = dirLine->vPoints[cpi];
+
+				Vec2f nx = dirLine->xdir;
+				float du = (pt - dirLine->xstart).dot(nx);
+
+				Vec3f n_dq_dQ(nx[0] * a, nx[1] * c, nx[0] * b + nx[1] * d);
+
+				auto dt = n_dq_dQ.t() * R;
+				auto dR = vcp[i].center.cross(Vec3f(dt.val[0], dt.val[1], dt.val[2]));
+
+				Vec6f j(dt.val[0], dt.val[1], dt.val[2], dR.x, dR.y, dR.z);
+
+				float w = pow(1.f / (fabs(du - cp.x) + 1.f), 2.f - alpha) * cp.w * cp.w;
+
+				E_x += w * (du - cp.x) * (du - cp.x);
+
+				f_x += w * (du - cp.x);
+
+				J += w * (du - cp.x) * j;
+
+				JJ += w * j * j.t();
+			}
 		}
-
-		A = A(Rect(0, 0, 6, irow)).clone();
-		b = b(Rect(0, 0, 1, irow)).clone();
-		//cout << A << endl;
-		//cout << A1 << endl;
-		// 解线性方程组
-		Mat p_;
-		if (solve(A, b, p_, DECOMP_SVD))
+		if (isinit)
 		{
-			// 断言确保解的维度正确
-			CV_Assert(p_.rows == 6 && p_.cols == 1);
+			float tao = 1e-3;
+			for (int i = 0; i < 6; i++)
+				mu = max(mu, tao * JJ(i, i));
+		}
+		for (int i = 0; i < 6; i++)
+			JJ(i, i) += mu;
 
-			// 获取解向量
-			const float* p = p_.ptr<float>();
-			// 使用罗德里格斯公式更新旋转矩阵
-			Matx33f R_ = Matx33f::eye();
-			R_(0, 1) = -p[2];
-			R_(1, 0) = p[2];
-			R_(0, 2) = p[1];
-			R_(2, 0) = -p[1];
-			R_(1, 2) = -p[0];
-			R_(2, 1) = p[0];
+		int ec = 0;
 
-			// 使用SVD确保旋转矩阵保持正交
-			Matx33f U, Vt;
-			Mat W;
-			cv::SVDecomp(R_, W, U, Vt);
-			R_ = U * Vt;
+		Vec6f p;// = -JJ.inv() * J;
+		if (solve(JJ, -J, p))
+		{
+			cv::Vec3f dt(p[0], p[1], p[2]);
+			cv::Vec3f rvec(p[3], p[4], p[5]);
+			Matx33f dR;
+			cv::Rodrigues(rvec, dR);
 
-			// 检查旋转矩阵的行列式，保证其为正值
-			float det = cv::determinant(R_);
-			if (det < 0) {
-				Matx33f B = Matx33f::eye();
-				B(2, 2) = det;
-				R_ = Vt.t() * B * U.t();
+			pose.t = pose.R * dt + pose.t;
+			pose.R = pose.R * dR;
+			R = pose.R;
+			t = pose.t;
+			for (int i = 0; i < npt; ++i)
+			{
+				Point3f Q = R * vcp[i].center + t;
+				Point3f q = K * Q;
+				const int x = int(q.x / q.z + 0.5), y = int(q.y / q.z + 0.5);
+				if (uint(x - _roi.x) >= uint(_roi.width) || uint(y - _roi.y) >= uint(_roi.height))
+					continue;
+				Point3f qn = K * (R * vcp[i].normal + t);
+				Vec2f n(qn.x / qn.z - q.x / q.z, qn.y / qn.z - q.y / q.z);
+				n = normalize(n);
+				const float X = Q.x, Y = Q.y, Z = Q.z;
+				const float a = fx / Z, b = -fx * X / (Z * Z), c = fy / Z, d = -fy * Y / (Z * Z);
+				Point2f pt(q.x / q.z, q.y / q.z);
+				auto* dd = this->getDirData(n);
+				if (!dd)
+					continue;
+				int cpi;
+				auto* dirLine = dd->getScanLine(pt, cpi);
+				if (!dirLine || cpi < 0)
+					continue;
+				auto& cp = dirLine->vPoints[cpi];
+				Vec2f nx = dirLine->xdir;
+				float du = (pt - dirLine->xstart).dot(nx);
+				Vec3f n_dq_dQ(nx[0] * a, nx[1] * c, nx[0] * b + nx[1] * d);
+				auto dt = n_dq_dQ.t() * R;
+				auto dR = vcp[i].center.cross(Vec3f(dt.val[0], dt.val[1], dt.val[2]));
+				Vec6f j(dt.val[0], dt.val[1], dt.val[2], dR.x, dR.y, dR.z);
+				float w = pow(1.f / (fabs(du - cp.x) + 1.f), 2.f - alpha) * cp.w * cp.w;
+				E_deltax += w * (du - cp.x) * (du - cp.x);
+				f_deltx += w * (du - cp.x);
+			}
+			E_diff = E_deltax - E_x;//F(x;t) - F(x;t+△t)
+			L_diff = (-p.t() * J * f_x - 0.5 * p.t() * J * J.t() * p)[0];//L(0) - L(△t)
+			ρ = E_diff / L_diff;
+			if (ρ > 0)
+			{
+				float s = 1.f / 3.f;
+				v = 2.f;
+				float temp = (1 - pow(2 * ρ - 1, 3));
+				mu = (temp > s ? mu * temp : mu * s);
+
+			}
+			else
+			{
+				//此时会造成代价函数值增大，不更新参数
+				mu = mu * v;
+				v = v * 2;
 			}
 
-			// 获取平移向量
-			Point3f t_(p[3], p[4], p[5]);
 
-			// 更新旋转矩阵和平移向量
-			R = Matx33f(R_) * R;
-			t = Matx33f(R_) * t + t_;
-			/*R =  R * Matx33f(R_);
-			t = R * t_;*/
-			pose.R = R;
-			pose.t = t;
-			float diff = p_.dot(p_);
+			if (g_uhdl)
+				g_uhdl->onUpdate(pose.R, pose.t);
 
-			return diff < eps ? 0 : 1;
+			float diff = p.dot(p);
+
+			return diff < eps* eps ? 0 : 1;
 		}
+
 		return 0;
 	}
 	bool update(PoseData& pose, const Matx33f& K, const std::vector<CPoint>& cpoints, int maxItrs, float alpha, float eps)
 	{
+		float mu = 0.f;
+		float v = 2.f;
 		for (int itr = 0; itr < maxItrs; ++itr)
-			if (this->_update(pose, K, cpoints, alpha, eps) <= 0)
+			if (this->_update(pose, K, cpoints, alpha, eps, mu, v, itr == 0) <= 0)
 				return false;
 		return true;
 	}
@@ -911,7 +942,6 @@ inline float Templates::pro1(const Matx33f& K, Pose& pose, const Mat1f& curProb,
 	roi = rectOverlapped(roi, Rect(0, 0, curProb.cols, curProb.rows));
 	dfr.computeScanLines(curProb, roi);
 
-	//printf("init time=%dms \n", int(clock() - beg));
 
 	Optimizer::PoseData dpose;
 	static_cast<Pose&>(dpose) = pose;
@@ -1245,28 +1275,6 @@ public:
 	int fi;
 	virtual float update(Pose& pose)
 	{
-		/*_cur.pose = _scalePose(pose);
-		Projector prj(_K, _cur.pose.R, _cur.pose.t);
-		vector<Point2f>cPts;
-		int curView = _obj.templ._getNearestView(_cur.pose.R, _cur.pose.t);
-		if (uint(curView) < _obj.templ.views.size())
-		{
-			Point2f objCenter = prj(_obj.templ.modelCenter);
-			auto& view = _obj.templ.views[curView];
-
-			for (auto& cp : view.contourPoints3d)
-			{
-				Point2f c = prj(cp.center);
-				cPts.push_back(c);
-			}
-			Rect_<float> rectf = getBoundingBox2D(cPts);
-			Rect roi = Rect(rectf);
-		}
-		cv::Mat foreground = cv::Mat::zeros(cv::Size(640, 512), CV_8UC1);
-		vector<Point> contourPoints(cPts.begin(), cPts.end());
-		vector<vector<Point>> contours = { contourPoints };
-		drawContours(foreground, contours, -1, Scalar(255, 255, 255), FILLED);*/
-		//foreground.convertTo(foreground, CV_32F, 1 / 255.0);
 		
 		_cur.pose = _scalePose(pose);
 
