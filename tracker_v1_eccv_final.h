@@ -646,7 +646,7 @@ public:
 		return err / nerr;
 	}
 
-	int _update(PoseData& pose, const Matx33f& K, const std::vector<CPoint>& cpoints, float alpha, float eps, float mu, float v, bool isinit)
+	int _update(PoseData& pose, const Matx33f& K, const std::vector<CPoint>& cpoints, float alpha, float eps, float mu, float v, bool isinit, int interval, int idx)
 	{
 		Matx33f R = pose.R;
 		Point3f t = pose.t;
@@ -672,7 +672,7 @@ public:
 		Matx66f JJ = Matx66f::zeros();
 		Vec6f J(0, 0, 0, 0, 0, 0);
 
-		for (int i = 0; i < npt; ++i)
+		for (int i = idx; i < npt; i += interval)
 		{
 			Point3f Q = R * vcp[i].center + t;
 			Point3f q = K * Q;
@@ -811,12 +811,12 @@ public:
 
 		return 0;
 	}
-	bool update(PoseData& pose, const Matx33f& K, const std::vector<CPoint>& cpoints, int maxItrs, float alpha, float eps)
+	bool update(PoseData& pose, const Matx33f& K, const std::vector<CPoint>& cpoints, int maxItrs, float alpha, float eps, int interval, int idx)
 	{
 		float mu = 0.f;
 		float v = 2.f;
 		for (int itr = 0; itr < maxItrs; ++itr)
-			if (this->_update(pose, K, cpoints, alpha, eps, mu, v, itr == 0) <= 0)
+			if (this->_update(pose, K, cpoints, alpha, eps, mu, v, itr == 0, interval, idx) <= 0)
 				return false;
 		return true;
 	}
@@ -870,12 +870,14 @@ public:
 		return _getNearestView(this->_getViewDir(R, t));
 	}
 
-	float pro(const Matx33f& K, Pose& pose, const Mat1f& curProb, float thetaT, float errT)
+	float pro(const Matx33f& K, Pose& pose, const Mat1f& curProb, const Mat img, float thetaT, float errT)
 	{
-		return this->pro1(K, pose, curProb, thetaT, errT);
+		return this->pro1(K, pose, curProb, img, thetaT, errT);
 	}
 
-	float pro1(const Matx33f& K, Pose& pose, const Mat1f& curProb, float thetaT, float errT);
+	float pro1(const Matx33f& K, Pose& pose, const Mat1f& curProb, const Mat curImg, float thetaT, float errT);
+
+	float eval(const Matx33f& K, Pose& pose, const Mat curImg, vector<CPoint>cpoints, int interval, int idx);
 };
 
 
@@ -924,10 +926,58 @@ public:
 
 };
 
-inline float Templates::pro1(const Matx33f& K, Pose& pose, const Mat1f& curProb, float thetaT, float errT)
+inline float Templates::eval(const Matx33f& K, Pose& pose, const Mat curImg, vector<CPoint>cpoints, int interval, int idx)
 {
+	Matx33f R = pose.R;
+	Point3f t = pose.t;
+
+	auto* vcp = &cpoints[0];
+	int npt = (int)cpoints.size();
+	Mat gray;
+	cvtColor(curImg, gray, COLOR_BGR2GRAY);
+	Mat Sobelx, Sobely;
+	Sobel(gray, Sobelx, CV_32F, 1, 0, 3);
+	Sobel(gray, Sobely, CV_32F, 0, 1, 3);
+	/*imshow("gray", gray);
+	imshow("Sobelx", Sobelx);
+	imshow("Sobely", Sobely);
+	waitKey(0);*/
+	Mat img = curImg.clone();
+
+	float res = 0;
+	for (int i = idx; i < npt; i += interval)
+	{
+		Point3f Q = R * vcp[i].center + t;
+		Point3f q = K * Q;
+		const int x = int(q.x / q.z + 0.5), y = int(q.y / q.z + 0.5);
+		if (x >= curImg.cols || y >= curImg.rows || x < 0 || y < 0)
+			continue;
+		Point p(x, y);
+		Point3f qn = K * (R * vcp[i].normal + t);
+		Vec2f n(qn.x / qn.z - q.x / q.z, qn.y / qn.z - q.y / q.z);
+		n = normalize(n);
+		float edgex = Sobelx.at<float>(p);
+		float edgey = Sobely.at<float>(p);
+		Vec2f pixeln(edgex, edgey);
+		pixeln = normalize(pixeln);
+		float cosAngle = n.dot(pixeln) / (norm(n) * norm(pixeln));
+		res += fabs(cosAngle);
+		/*line(img, p, p + Point(n)*10, Scalar(0, 255, 0));
+		line(img, p, p + Point(pixeln)*10, Scalar(0, 0, 255));
+		imshow("img", img);
+		waitKey(0);*/
+	}
+	int intervalnpt = npt / interval;
+	intervalnpt = (npt % interval > idx ? intervalnpt + 1 : intervalnpt);
+	res /= intervalnpt;
+	return res;
+}
+
+inline float Templates::pro1(const Matx33f& K, Pose& pose, const Mat1f& curProb, const Mat curImg, float thetaT, float errT)
+{	
 	Rect curROI;
 	int curView = this->_getNearestView(pose.R, pose.t);
+	//eval(K, pose, curImg, this->views[curView].contourPoints3d, 1, 0);
 	{
 		Projector prj(K, pose.R, pose.t);
 		std::vector<Point2f>  c2d = prj(views[curView].contourPoints3d, [](const CPoint& p) {return p.center; });
@@ -942,18 +992,32 @@ inline float Templates::pro1(const Matx33f& K, Pose& pose, const Mat1f& curProb,
 	roi = rectOverlapped(roi, Rect(0, 0, curProb.cols, curProb.rows));
 	dfr.computeScanLines(curProb, roi);
 
-
-	Optimizer::PoseData dpose;
-	static_cast<Pose&>(dpose) = pose;
+	/*Optimizer::PoseData dpose;
+	static_cast<Pose&>(dpose) = pose;*/
 	const float alpha = 0.125f, alphaNonLocal = 0.75f, eps = 1e-4f;
-	const int outerItrs = 10, innerItrs = 3;
+	const int outerItrs = 10, innerItrs = 3; int interval = 5;
+	vector<Optimizer::PoseData>dposes(interval);
+	float maxAngle = 0.f; int maxidx = -1;
 
-	for (int itr = 0; itr < outerItrs; ++itr)
+	for (int i = 0; i < interval; i++)
 	{
-		curView = this->_getNearestView(dpose.R, dpose.t);
-		if (!dfr.update(dpose, K, this->views[curView].contourPoints3d, innerItrs, alpha, eps))
-			break;
+		auto& dpose = dposes[i];
+		static_cast<Pose&>(dpose) = pose;
+		for (int itr = 0; itr < outerItrs; ++itr)
+		{
+			curView = this->_getNearestView(dpose.R, dpose.t);
+			if (!dfr.update(dpose, K, this->views[curView].contourPoints3d, innerItrs, alpha, eps, interval, i))
+				break;
+		}
+		float evaluate = eval(K, dpose, curImg, this->views[curView].contourPoints3d, interval, i);
+		if (maxAngle < evaluate)
+		{
+			maxAngle = evaluate;
+			maxidx = i;
+		}
 	}
+	
+	auto& dpose = dposes[maxidx];
 
 	float errMin = dfr.calcError(dpose, K, this->views[curView].contourPoints3d, alpha);
 
@@ -1286,7 +1350,7 @@ public:
 			errT = _getMedianOfLastN(_frameInfo, 15, [](const FrameInfo& v) {return v.err; });
 		}
 
-		_cur.err = _obj.templ.pro(_K, _cur.pose, _cur.colorProb, thetaT, _isLocalTracking ? FLT_MAX : errT);
+		_cur.err = _obj.templ.pro(_K, _cur.pose, _cur.colorProb, _cur.img, thetaT, _isLocalTracking ? FLT_MAX : errT);
 		pose = _descalePose(_cur.pose);
 		return _cur.err;
 	}
