@@ -378,7 +378,7 @@ public:
 			for (int i = 1; i < size - 1; ++i)
 			{
 				if (data[i] > data[i - 1] && data[i] > data[i + 1])
-				//if ((data[i] != data[i - 1] && data[i]==255) || data[i] > data[i + 1])
+					//if ((data[i] != data[i - 1] && data[i]==255) || data[i] > data[i + 1])
 				{
 					auto& lm = vlm[nlm++];
 					lm.x = i;
@@ -501,38 +501,38 @@ public:
 		_dirs.resize(N * 2);
 
 		for (int i = 0; i < N; ++i)
-		//cv::parallel_for_(cv::Range(0, N), [&](const cv::Range& r) {
-			//for (int i = r.start; i < r.end; ++i)
-			{
-				double theta = 180.0 / N * i;
-				Matx23f A = getRotationMatrix2D(center, theta, 1.0);
-				std::vector<Point2f> Acorners;
-				cv::transform(corners, Acorners, A);
-				cv::Rect droi = getBoundingBox2D(Acorners);
-				A = Matx23f(1, 0, -droi.x,
-					0, 1, -droi.y) * A;
+			//cv::parallel_for_(cv::Range(0, N), [&](const cv::Range& r) {
+				//for (int i = r.start; i < r.end; ++i)
+		{
+			double theta = 180.0 / N * i;
+			Matx23f A = getRotationMatrix2D(center, theta, 1.0);
+			std::vector<Point2f> Acorners;
+			cv::transform(corners, Acorners, A);
+			cv::Rect droi = getBoundingBox2D(Acorners);
+			A = Matx23f(1, 0, -droi.x,
+				0, 1, -droi.y) * A;
 
-				Mat1f dirProb;
-				cv::warpAffine(prob_, dirProb, A, droi.size(), INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
+			Mat1f dirProb;
+			cv::warpAffine(prob_, dirProb, A, droi.size(), INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
 
-				theta = theta / 180.0 * CV_PI;
-				auto dir = Vec2f(cos(theta), sin(theta));
+			theta = theta / 180.0 * CV_PI;
+			auto dir = Vec2f(cos(theta), sin(theta));
 
-				/*imshow("dirProb", dirProb);
-				cv::waitKey();*/
+			/*imshow("dirProb", dirProb);
+			cv::waitKey();*/
 
-				auto& positiveDir = _dirs[i];
-				auto& negativeDir = _dirs[i + N];
+			auto& positiveDir = _dirs[i];
+			auto& negativeDir = _dirs[i + N];
 
-				auto invA = invertAffine(A);
-				_calcScanLinesForRows(dirProb, positiveDir, negativeDir, invA);
+			auto invA = invertAffine(A);
+			_calcScanLinesForRows(dirProb, positiveDir, negativeDir, invA);
 
-				positiveDir.dir = dir;
-				negativeDir.dir = -dir;
-			}
-			/*});*/
+			positiveDir.dir = dir;
+			negativeDir.dir = -dir;
+		}
+		/*});*/
 
-		//normalize weight of contour points
+	//normalize weight of contour points
 		{
 			float wMax = 0;
 			for (auto& dir : _dirs)
@@ -944,14 +944,18 @@ inline float Templates::eval(const Matx33f& K, Pose& pose, const Mat curImg, vec
 	waitKey(0);*/
 	Mat img = curImg.clone();
 
-	float res = 0;
+	float res = 0; int continuePt = 0; int intervalnpt = 0;
 	for (int i = idx; i < npt; i += interval)
 	{
+
 		Point3f Q = R * vcp[i].center + t;
 		Point3f q = K * Q;
 		const int x = int(q.x / q.z + 0.5), y = int(q.y / q.z + 0.5);
 		if (x >= curImg.cols || y >= curImg.rows || x < 0 || y < 0)
+		{
+			continuePt++;
 			continue;
+		}
 		Point p(x, y);
 		Point3f qn = K * (R * vcp[i].normal + t);
 		Vec2f n(qn.x / qn.z - q.x / q.z, qn.y / qn.z - q.y / q.z);
@@ -959,22 +963,30 @@ inline float Templates::eval(const Matx33f& K, Pose& pose, const Mat curImg, vec
 		float edgex = Sobelx.at<float>(p);
 		float edgey = Sobely.at<float>(p);
 		Vec2f pixeln(edgex, edgey);
+		if (norm(pixeln) == 0)
+		{
+			continuePt++;
+			continue;
+		}
 		pixeln = normalize(pixeln);
+		n = -n;
 		float cosAngle = n.dot(pixeln) / (norm(n) * norm(pixeln));
-		res += fabs(cosAngle);
+		res += (cosAngle);
+		intervalnpt++;
 		/*line(img, p, p + Point(n)*10, Scalar(0, 255, 0));
 		line(img, p, p + Point(pixeln)*10, Scalar(0, 0, 255));
 		imshow("img", img);
 		waitKey(0);*/
 	}
-	int intervalnpt = npt / interval;
+	/*int intervalnpt = npt / interval;
 	intervalnpt = (npt % interval > idx ? intervalnpt + 1 : intervalnpt);
+	intervalnpt -= continuePt;*/
 	res /= intervalnpt;
 	return res;
 }
 
 inline float Templates::pro1(const Matx33f& K, Pose& pose, const Mat1f& curProb, const Mat curImg, float thetaT, float errT)
-{	
+{
 	Rect curROI;
 	int curView = this->_getNearestView(pose.R, pose.t);
 	//eval(K, pose, curImg, this->views[curView].contourPoints3d, 1, 0);
@@ -995,9 +1007,9 @@ inline float Templates::pro1(const Matx33f& K, Pose& pose, const Mat1f& curProb,
 	/*Optimizer::PoseData dpose;
 	static_cast<Pose&>(dpose) = pose;*/
 	const float alpha = 0.125f, alphaNonLocal = 0.75f, eps = 1e-4f;
-	const int outerItrs = 10, innerItrs = 3; int interval = 5;
+	const int outerItrs = 10, innerItrs = 3; int interval = 3;
 	vector<Optimizer::PoseData>dposes(interval);
-	float maxAngle = 0.f; int maxidx = -1;
+	float maxAngle = -1.1f; int maxidx = -1;
 
 	for (int i = 0; i < interval; i++)
 	{
@@ -1009,6 +1021,7 @@ inline float Templates::pro1(const Matx33f& K, Pose& pose, const Mat1f& curProb,
 			if (!dfr.update(dpose, K, this->views[curView].contourPoints3d, innerItrs, alpha, eps, interval, i))
 				break;
 		}
+		curView = this->_getNearestView(dpose.R, dpose.t);
 		float evaluate = eval(K, dpose, curImg, this->views[curView].contourPoints3d, interval, i);
 		if (maxAngle < evaluate)
 		{
@@ -1016,7 +1029,7 @@ inline float Templates::pro1(const Matx33f& K, Pose& pose, const Mat1f& curProb,
 			maxidx = i;
 		}
 	}
-	
+
 	auto& dpose = dposes[maxidx];
 
 	float errMin = dfr.calcError(dpose, K, this->views[curView].contourPoints3d, alpha);
@@ -1177,6 +1190,17 @@ public:
 		_tab.resize(TAB_SIZE);
 		_dtab.resize(TAB_SIZE);
 	}
+	void clear()
+	{
+		for (int i = 0; i < TAB_SIZE; ++i)
+		{
+			for (int j = 0; j < 2; ++j)
+			{
+				_tab[i].nbf[j] = 0.f;
+				_dtab[i].nbf[j] = 0.f;
+			}
+		}
+	}
 	void update(Object& obj, const Mat3b& img, const Pose& pose, const Matx33f& K, float learningRate)
 	{
 		//learningRate = 0.1f;
@@ -1200,17 +1224,18 @@ public:
 			}
 			return false;
 		};
-
+		//Mat imgclone = img.clone();
 		int curView = templ._getNearestView(pose.R, pose.t);
 		if (uint(curView) < templ.views.size())
 		{
 			Point2f objCenter = prj(modelCenter);
-
+			//circle(imgclone, objCenter, 5, Scalar(0, 0, 255), -1);
 			auto& view = templ.views[curView];
 			for (auto& cp : view.contourPoints3d)
 			{
 				Point2f c = prj(cp.center);
 				Point2f n = objCenter - c;
+				//circle(imgclone, c, 1, Scalar(0, 255, 0), -1);
 				const float fgLength = sqrt(n.dot(n));
 				n = n * (1.f / fgLength);
 
@@ -1303,9 +1328,10 @@ public:
 		_mProj = cvrm::fromK(K, img.size(), 0.1, 3);
 		_K = K;
 
+		_colorHistogram.clear();
 		_colorHistogram.update(_obj, _cur.img, _cur.pose, _K, 1.f);
 	}
-	virtual void startUpdate(const Mat& img,int fi, Pose gtPose = Pose())
+	virtual void startUpdate(const Mat& img, int fi, Pose gtPose = Pose())
 	{
 		if (!_prev.img.empty())
 		{
@@ -1339,7 +1365,7 @@ public:
 	int fi;
 	virtual float update(Pose& pose)
 	{
-		
+
 		_cur.pose = _scalePose(pose);
 
 		float thetaT = CV_PI / 8, errT = 1.f; //default values used for only the first 2 frames
