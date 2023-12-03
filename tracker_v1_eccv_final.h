@@ -969,9 +969,8 @@ inline float Templates::eval(const Matx33f& K, Pose& pose, const Mat curImg, vec
 			continue;
 		}
 		pixeln = normalize(pixeln);
-		n = -n;
 		float cosAngle = n.dot(pixeln) / (norm(n) * norm(pixeln));
-		res += (cosAngle);
+		res += fabs(cosAngle);
 		intervalnpt++;
 		/*line(img, p, p + Point(n)*10, Scalar(0, 255, 0));
 		line(img, p, p + Point(pixeln)*10, Scalar(0, 0, 255));
@@ -1009,7 +1008,7 @@ inline float Templates::pro1(const Matx33f& K, Pose& pose, const Mat1f& curProb,
 	const float alpha = 0.125f, alphaNonLocal = 0.75f, eps = 1e-4f;
 	const int outerItrs = 10, innerItrs = 3; int interval = 3;
 	vector<Optimizer::PoseData>dposes(interval);
-	float maxAngle = -1.1f; int maxidx = -1;
+	float maxAngle = 0.f; int maxidx = -1;
 
 	for (int i = 0; i < interval; i++)
 	{
