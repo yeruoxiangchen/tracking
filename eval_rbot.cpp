@@ -51,14 +51,14 @@ public:
 
 				{
 					Mat t;
-					cv::addWeighted(dimg(roi), 0.5, rr.img(roi), 0.5, 0, t);
+					cv::addWeighted(dimg(roi), 0.6, rr.img(roi), 0.4, 0, t);
 					t.copyTo(dimg(roi), mask(roi));
 					//rr.img(roi).copyTo(dimg(roi), mask(roi));
 				}
 				{
 					std::vector<std::vector<Point> > cont;
 					cv::findContours(mask, cont, CV_RETR_LIST, CV_CHAIN_APPROX_NONE);
-					drawContours(dimg, cont, -1, Scalar(255, 255, 255), 1, CV_AA);
+					drawContours(dimg, cont, -1, Scalar(255, 0, 255), 1, CV_AA);
 					//drawContours(dimg, cont, -1, Scalar(255, 0, 0), 2, CV_AA);
 				}
 			}
@@ -79,14 +79,16 @@ static void on_trackers_test_accuracy()
 		"duck", "eggbox",     "glue",          "iron",         "koalacandy",
 		"lamp", "phone",      "squirrel" };*/
 
-	std::string modelName = "ape";
+	std::string modelName = "can";
 
 	CVRModel model(dataPath + modelName + "/" + modelName + ".obj");
 	VisHandler visHdl(model, K);
 
 	std::string imgDir = dataPath + modelName + "/frames/";
+	//std::string imgDir = dataPath + modelName + "/mask/";
 	auto loadImage = [&imgDir](int fi) {
 		auto file = imgDir + ff::StrFormat("a_regular%04d.png", fi);
+		//auto file = imgDir + ff::StrFormat("%06d-mask.png", fi);
 		//auto file = imgDir + ff::StrFormat("b_dynamiclight%04d.png", fi);
 		//auto file = imgDir + ff::StrFormat("c_noisy%04d.png", fi);
 		return cv::imread(file, cv::IMREAD_COLOR);
@@ -104,19 +106,23 @@ static void on_trackers_test_accuracy()
 	const int S = 1;
 	for (int fi = start+S; fi <= 1000; fi += S)
 	{
-		if (fi == 117)
-		{
-			int a = 1;
-		}
+
 		g_fi = fi;
-		tracker.fi = fi;
+		//tracker.fi = fi;
 		cv::Mat3b img = loadImage(fi);
 		time_t beg = clock();
 		tracker.startUpdate(img, fi);//根据reset的帧里的直方图计算前景的概率
 		//pose = gtPoses[fi];
-		tracker.update(pose);
+		//imshow("curProb", tracker._cur.colorProb);
+		//cv::Mat outputImage;
+		//tracker._cur.colorProb.convertTo(outputImage, CV_8U, 255.0);
+		//imwrite("D:/RBOT_dataset/cube/curProb/1last.png" /*+ ff::StrFormat("/%d-curProb.png", fi)*/, outputImage);
+		tracker.update(pose,gtPoses[fi]);
 
 		tracker.endUpdate(pose);
+		//imshow("closestProb", tracker._colorHistogram.getProb(loadImage(fi + 1)));
+		//tracker._colorHistogram.getProb(loadImage(fi + 1)).convertTo(outputImage, CV_8U, 255.0);
+		//imwrite("D:/RBOT_dataset/cube/curProb/2next.png" /*+ ff::StrFormat("/%d-curProb.png", fi)*/, outputImage);
 		totalTime += int(clock() - beg);
 		printf("fi=%d, time=%dms     \r", fi, int(clock() - beg));
 		//Mat dimg = frender.renderResults(img, K, pose);
@@ -124,6 +130,7 @@ static void on_trackers_test_accuracy()
 		//cv::imshow("dimg", dimg);
 		//cv::imshow("gimg", gimg);
 		//waitKey(0);
+
 		if (isLost(pose, gtPoses[fi]))
 		{
 			printf("E%d",fi);
@@ -132,18 +139,27 @@ static void on_trackers_test_accuracy()
 			printLost(gtPoses[fi - S].R, gtPoses[fi - S].t, gtPoses[fi].R, gtPoses[fi].t);
 			printf("\n");
 
+			//Mat dimg = frender.renderResults(img, K, pose);
+			//Mat gimg = frender.renderResults(img, K, gtPoses[fi - 1]);
+			//cv::imshow("dimg", dimg);
+			//cv::imshow("gimg", gimg);
+			//cv::waitKey(0);
 			pose = gtPoses[fi];
 			tracker.reset(img, pose, K);
 			++nLost;
+			
 		}
 		++nTotal;
+		//cv::waitKey(0);
+		//imshow("finalProb", tracker._colorHistogram.getProb(loadImage(fi + 1)));
+		//tracker._colorHistogram.getProb(loadImage(fi + 1)).convertTo(outputImage, CV_8U, 255.0);
+		//imwrite("D:/RBOT_dataset/cube/curProb/3true.png" /*+ ff::StrFormat("/%d-curProb.png", fi)*/, outputImage);
+		//if (fi == 417)break;
 		
-		if (cv::waitKey() == 'q')
-			break;
 	}
 	printf("updatesPerIm=%.2f\n", float(vx::g_totalUpdates) / nTotal);
 	printf("acc=%.2f  meanTime=%.2f   \n", 100.f * (nTotal - nLost) / nTotal, float(totalTime)/nTotal);
-	//printf("avgmetric=%.2f    maxmetric=%.2f    minmetric=%.2f   \n", vx::g_avgMetric / 1000, vx::g_maxMetric, vx::g_minMetric);
+	
 }
 
 CMD_BEG()
@@ -209,7 +225,7 @@ static void on_trackers_test_accuracy_all()
 			time_t beg = clock();
 
 			tracker.startUpdate(img, fi);
-			tracker.update(pose);
+			//tracker.update(pose);
 			tracker.endUpdate(pose);
 
 			totalTime += uint(clock() - beg);
@@ -298,7 +314,7 @@ static void on_trackers_test_accuracy_show()
 		tracker.startUpdate(img, fi);//根据reset的帧里的直方图计算前景的概率
 
 		auto R0 = pose.R;
-		tracker.update(pose);
+		//tracker.update(pose);
 
 		tracker.endUpdate(pose);
 		totalTime += int(clock() - beg);
@@ -389,7 +405,7 @@ static void on_trackers_test_upd()
 			time_t beg = clock();
 
 			tracker.startUpdate(img, fi);
-			tracker.update(pose);
+			//tracker.update(pose);
 			tracker.endUpdate(pose);
 
 			totalTime += uint(clock() - beg);
@@ -517,7 +533,7 @@ static void mulitrackers_show()
 			time_t beg = clock();
 
 			tracker.startUpdate(img, fi);
-			tracker.update(poses[0]);
+			//tracker.update(poses[0]);
 			tracker.endUpdate(poses[0]);
 			totalTime += uint(clock() - beg);
 			++totalFrames;
@@ -568,6 +584,43 @@ static void mulitrackers_show()
 
 CMD_BEG()
 CMD0("3dmultiobj_show", mulitrackers_show)
+CMD_END()
+
+static void video_gen()
+{
+	string folderPath = "D:/RBOT_dataset/can/py";
+	int frameWidth = 640;  // 根据实际图像调整
+	int frameHeight = 512; // 根据实际图像调整
+	double fps = 10;        // 设定帧率
+
+	VideoWriter video("D:/RBOT_dataset/can/output.mp4", VideoWriter::fourcc('X', 'V', 'I', 'D'), fps, Size(frameWidth, frameHeight));
+
+	if (!video.isOpened()) {
+		cout << "Could not open the output video for write." << endl;
+		return;
+	}
+
+	for (int i = 1; i <= 1000; i++) {
+		for (int j = 0; j <= 4; j++) {
+			string filePath = folderPath + "/" + to_string(i) + "_" + to_string(j) + ".png"; // 确保这里的扩展名与实际图像相符
+			Mat frame = imread(filePath);
+			cout << "the image finished: " << filePath << endl;
+			if (frame.empty()) {
+				//cout << "Could not open or find the image: " << filePath << endl;
+				continue;
+			}
+
+			video.write(frame);
+		}
+	}
+
+	video.release();
+	cout << "Video created successfully." << endl;
+
+}
+
+CMD_BEG()
+CMD0("videogenerating", video_gen)
 CMD_END()
 
 _STATIC_END

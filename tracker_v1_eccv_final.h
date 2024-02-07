@@ -11,7 +11,8 @@ using namespace cv;
 #include<queue>
 #include"tracker_base.h"
 #include"utils.h"
-
+#include <iomanip>
+#include <set>
 _TRACKER_BEG(v1)
 
 inline Mat1b getRenderMask(const Mat1f& depth, float eps = 1e-6)
@@ -55,8 +56,10 @@ struct CPoint
 {
 	Point3f    center;
 	Point3f    normal;
+	float      edgew;
 
-	DEFINE_BFS_IO_2(CPoint, center, normal)
+	//DEFINE_BFS_IO_2(CPoint, center, normal)
+	DEFINE_BFS_IO_3(CPoint, center, normal, edgew)
 };
 
 
@@ -64,13 +67,14 @@ struct CPoint
 class EdgeSampler
 {
 public:
-	static void _sample(Rect roiRect, const Mat1f& depth, CVRProjector& prj, std::vector<CPoint>& c3d, int nSamples)
+	static void _sample(Rect roiRect, const Mat1f& depth, CVRProjector& prj, std::vector<CPoint>& c3d, int nSamples, const Mat1s& dx, const Mat1s& dy)
 	{
 		Mat1b depthMask = getRenderMask(depth);
+		//imwrite("D:\\RBOT_dataset\\can\\mask.png", depthMask);
 
 		std::vector<std::vector<cv::Point>> contours;
 		cv::findContours(depthMask, contours, RETR_EXTERNAL, CHAIN_APPROX_NONE);
-
+		//cv::findContours(depthMask, contours, RETR_LIST, CHAIN_APPROX_NONE);
 		const int dstride = stepC(depth);
 		auto get3D = [&depthMask, &depth, dstride, &prj, roiRect](int x, int y, Point3f& P, float& _z) {
 			float z = 0;
@@ -93,7 +97,7 @@ public:
 
 		const int smoothWSZ = 15, hwsz = smoothWSZ / 2;
 		float maxDiff = 1.f;
-
+		//cv::Mat visualization = cv::Mat::zeros(depth.size(), CV_8UC1);
 		for (auto& c : contours)
 		{
 			double area = cv::contourArea(c, true);
@@ -120,13 +124,26 @@ public:
 					n = Point2f(-n.y, n.x);
 					Point2f q = Point2f(c[i]) + n + Point2f(roiRect.x, roiRect.y);
 					P.normal = prj.unproject(q.x, q.y, depth);
+					P.edgew = fabs(dx(c[i].y, c[i].x)) + fabs(dy(c[i].y, c[i].x));
 					c3d.push_back(P);
+					//cv::line(visualization, c[i], Point2f(c[i]) + 100*n + Point2f(roiRect.x, roiRect.y), cv::Scalar(255, 255, 255));
+					//cv::circle(visualization, c[i], 5, cv::Scalar(255, 255, 0), -1);
+
 				}
 			}
 		}
+		//imwrite("D:\\RBOT_dataset\\can\\c.png", visualization);
+		float wsum = 0;
+		for (auto& cd : c3d) {
+			wsum += cd.edgew;
+		}
+		wsum /= c3d.size();
+		for (auto& cd : c3d) {
+			cd.edgew /= wsum;
+		}
 	}
 
-	static void sample(std::vector<CPoint>& c3d, const CVRResult& rr, int nSamples, Rect roiRect = Rect(0, 0, 0, 0), Size imgSize = Size(0, 0))
+	static void sample(std::vector<CPoint>& c3d, CVRResult& rr, int nSamples, Rect roiRect = Rect(0, 0, 0, 0), Size imgSize = Size(0, 0))
 	{
 		if (imgSize.width == 0 || imgSize.height == 0)
 			imgSize = rr.img.size();
@@ -136,9 +153,126 @@ public:
 
 		CVRProjector prj(rr.mats, imgSize);
 
-		_sample(roiRect, rr.depth, prj, c3d, nSamples);
+		Mat rgray = cv::convertBGRChannels(rr.img, 1);
+		Mat1s dx, dy;
+		cv::Sobel(rgray, dx, CV_16S, 1, 0);
+		cv::Sobel(rgray, dy, CV_16S, 0, 1);
+		
+		//Mat1b fgMask = rr.getMaskFromDepth();
+		//imwrite("D:\\RBOT_dataset\\can\\fgmask.png", fgMask);
+
+		_sample(roiRect, rr.depth, prj, c3d, nSamples, dx, dy);
 	}
 };
+
+
+struct IPoint
+{
+	Point3f    center;
+	float      edgew;
+
+	DEFINE_BFS_IO_2(IPoint, center, edgew)
+};
+
+
+
+class InnerSampler
+{
+public:
+	static void _sample(Rect roiRect, const Mat1f& depth, CVRProjector& prj, std::vector<IPoint>& c3d, int nSamples, const Mat1b fgMask, const Mat1s& dx, const Mat1s& dy)
+	{
+		Mat1b depthMask = getRenderMask(depth);
+
+		std::vector<std::vector<cv::Point>> contours;
+		cv::findContours(depthMask, contours, RETR_LIST, CHAIN_APPROX_NONE);
+		//namedWindow("Depth Mask", WINDOW_NORMAL);
+
+		//// 显示图像
+		//imshow("Depth Mask", depthMask);
+
+		// 等待用户按键
+		//waitKey(0);
+
+		const int dstride = stepC(depth);
+		auto get3D = [&depthMask, &depth, dstride, &prj, roiRect](int x, int y, Point3f& P, float& _z) {
+			float z = 0;
+			if (depthMask(y, x) != 0)
+				z = depth(y, x);
+			else
+			{
+				return false;
+			}
+			P = prj.unproject(float(x + roiRect.x), float(y + roiRect.y), z);
+			_z = z;
+
+			return true;
+		};
+
+		size_t npt = 0;
+		for (auto& c : contours)
+			npt += c.size();
+		int nSkip = (int)npt / nSamples;
+
+		const int smoothWSZ = 15, hwsz = smoothWSZ / 2;
+		float maxDiff = 1.f;
+		cv::Mat visualization = cv::Mat::zeros(depth.size(), CV_8UC1);
+		for (auto& c : contours)
+		{
+			double area = cv::contourArea(c, true);
+			if (area < 0) //if is clockwise
+				std::reverse(c.begin(), c.end()); //make it counter-clockwise
+
+			Mat2i  cimg(1, c.size(), (Vec2i*)&c[0], int(c.size()) * sizeof(Vec2f));
+			Mat2f  smoothed;
+			boxFilter(cimg, smoothed, CV_32F, Size(smoothWSZ, 1));
+			const Point2f* smoothedPts = smoothed.ptr<Point2f>();
+			std::set<std::pair<int, int>> sampledPoints;//存储
+			for (int i = nSkip / 2; i < (int)c.size(); i += nSkip)
+			{
+				IPoint P;
+				float depth;
+				if (get3D(c[i].x, c[i].y, P.center, depth))
+				{
+					P.edgew = fabs(dx(c[i].y, c[i].x)) + fabs(dy(c[i].y, c[i].x));
+					c3d.push_back(P);
+					cv::circle(visualization, c[i], 5, cv::Scalar(255, 255, 0), -1);
+				}
+			}
+		}
+		/*namedWindow("visualization", WINDOW_NORMAL);
+		imshow("visualization", visualization);
+		waitKey(0);*/
+		float wsum = 0;
+		for (auto& cd : c3d) {
+			wsum += cd.edgew;
+		}
+		wsum /= c3d.size();
+		for (auto& cd : c3d) {
+			cd.edgew /= wsum;
+		}
+	}
+
+	static void sample(std::vector<IPoint>& c3d, CVRResult& rr, int nSamples, Rect roiRect = Rect(0, 0, 0, 0), Size imgSize = Size(0, 0))
+	{
+		if (imgSize.width == 0 || imgSize.height == 0)
+			imgSize = rr.img.size();
+
+		if (roiRect.width == 0 || roiRect.height == 0)
+			roiRect = Rect(0, 0, imgSize.width, imgSize.height);
+
+		CVRProjector prj(rr.mats, imgSize);
+
+		Mat rgray = cv::convertBGRChannels(rr.img, 1);
+		Mat1s dx, dy;
+		cv::Sobel(rgray, dx, CV_16S, 1, 0);
+		cv::Sobel(rgray, dy, CV_16S, 0, 1);
+
+		Mat1b fgMask = rr.getMaskFromDepth();
+
+		_sample(roiRect, rr.depth, prj, c3d, nSamples, fgMask, dx, dy);
+	}
+};
+
 
 
 struct Projector
@@ -172,8 +306,10 @@ struct DView
 	cv::Matx33f R;
 
 	std::vector<CPoint>  contourPoints3d;
+	std::vector<IPoint>  innerPoints3d;
 
-	DEFINE_BFS_IO_3(DView, viewDir, R, contourPoints3d)
+	//DEFINE_BFS_IO_3(DView, viewDir, R, contourPoints3d)
+	DEFINE_BFS_IO_4(DView, viewDir, R, contourPoints3d, innerPoints3d)
 };
 
 struct ViewIndex
@@ -644,6 +780,58 @@ public:
 		return err / nerr;
 	}
 
+	int projpose(PoseData& pose, const Matx33f& K, const std::vector<CPoint>& cpoints, Mat img, Scalar s)
+	{
+		const Matx33f R = pose.R;
+		const Point3f t = pose.t;
+
+		const float fx = K(0, 0), fy = K(1, 1);
+
+		auto* vcp = &cpoints[0];
+		int npt = (int)cpoints.size();
+
+		Matx66f JJ = Matx66f::zeros();
+		Vec6f J(0, 0, 0, 0, 0, 0);
+
+		for (int i = 0; i < npt; ++i)
+		{
+			Point3f Q = R * vcp[i].center + t;
+			Point3f q = K * Q;
+
+			{
+				const int x = int(q.x / q.z + 0.5), y = int(q.y / q.z + 0.5);
+				if (uint(x - _roi.x) >= uint(_roi.width) || uint(y - _roi.y) >= uint(_roi.height))
+					continue;
+
+				Point3f qn = K * (R * vcp[i].normal + t);
+				Vec2f n(qn.x / qn.z - q.x / q.z, qn.y / qn.z - q.y / q.z);
+				n = normalize(n);
+
+				const float X = Q.x, Y = Q.y, Z = Q.z;
+
+				const float a = fx / Z, b = -fx * X / (Z * Z), c = fy / Z, d = -fy * Y / (Z * Z);
+
+				Point2f pt(q.x / q.z, q.y / q.z);
+
+				auto* dd = this->getDirData(n);
+				if (!dd)
+					continue;
+				int cpi;
+				auto* dirLine = dd->getScanLine(pt, cpi);
+				if (!dirLine || cpi < 0)
+					continue;
+
+				auto& cp = dirLine->vPoints[cpi];
+				auto matchp = dirLine->xstart + cp.x * dirLine->xdir;
+				circle(img, matchp, 1, s);
+
+			}
+		}
+
+		return 0;
+	}
+
+
 	int _update(PoseData& pose, const Matx33f& K, const std::vector<CPoint>& cpoints, float alpha, float eps)
 	{
 		const Matx33f R = pose.R;
@@ -757,14 +945,264 @@ public:
 	}
 };
 
+struct EdgeResponse
+{
+	Mat originimg; int fi; float prev; float cur;
+	Mat1f getImageField(Mat img, int nLayers = 1)
+	{
+		img = cv::convertBGRChannels(img, 1);
+
+		auto getF = [](const Mat1b& gray, Size dsize) {
+			Mat1f dx, dy;
+			cv::Sobel(gray, dx, CV_32F, 1, 0, 7);
+			cv::Sobel(gray, dy, CV_32F, 0, 1, 7);
+			for_each_2(DWHN1(dx), DN1(dy), [](float& dx, float dy) {
+				dx = fabs(dx) + fabs(dy);
+				});
+			if (dx.size() != dsize)
+				dx = imscale(dx, dsize, INTER_LINEAR);
+			return dx;
+		};
+
+		Mat1f f = getF(img, img.size());
+		for (int i = 1; i < nLayers; ++i)
+		{
+			img = imscale(img, 0.5);
+			f += getF(img, f.size());
+		}
+		float vmax = cv::maxElem(f);
+		f *= 1.f / vmax;
+		return 1.f - f;
+	}
+	Mat1f gradf;
+public:
+	EdgeResponse(Mat img)
+	{
+		gradf = getImageField(img);
+		originimg = img.clone();
+		prev = 0.f;
+		cur = 0.f;
+	}
+	EdgeResponse(Mat img, int fi)
+	{
+		gradf = getImageField(img);
+		originimg = img.clone();
+		this->fi = fi;
+		prev = 0.f;
+		cur = 0.f;
+	}
+	float Fx(Optimizer::PoseData& pose, const Matx33f& K, const std::vector<CPoint>& cpoints)
+	{
+		Mat1f f = gradf;
+
+		Mat1f dfx, dfy;
+		cv::Sobel(f, dfx, CV_32F, 1, 0);
+		cv::Sobel(f, dfy, CV_32F, 0, 1);
+
+		auto _resample = [](const Mat1f& f, float x, float y) {
+			int xi = int(x), yi = int(y);
+			if (uint(xi) < uint(f.cols - 1) && uint(yi) < uint(f.rows - 1))
+			{
+				const float* p = f.ptr<float>(yi, xi);
+				int stride = stepC(f);
+				float wx = x - xi, wy = y - yi;
+				float a = p[0] + wx * (p[1] - p[0]);
+				float b = p[stride] + wx * (p[stride + 1] - p[stride]);
+				return a + wy * (b - a);
+			}
+#define _clip(v, vmax) (v<0? 0 : v>vmax? vmax : v)
+			return f(_clip(yi, f.rows - 1), _clip(xi, f.cols - 1));
+#undef _clip
+		};
+
+		const Matx33f R = pose.R;
+		const Point3f t = pose.t;
+		int npt = cpoints.size();
+
+		const float fx = K(0, 0), fy = K(1, 1);
+
+		float F_x = 0.f;
+
+		for (size_t i = 0; i < cpoints.size(); ++i)
+		{
+			//	continue;
+			const Point3f Q = R * cpoints[i].center + t;
+			const Point3f q = K * Q;
+
+			const float X = Q.x, Y = Q.y, Z = Q.z;
+
+			const float a = fx / Z, b = -fx * X / (Z * Z), c = fy / Z, d = -fy * Y / (Z * Z);
+
+			Point2f pt(q.x / q.z, q.y / q.z);
+
+			//const int x = int(q.x + 0.5), y = int(q.y + 0.5);
+			if (uint(int(pt.x + 0.5)) >= uint(f.cols) || uint(int(pt.y + 0.5)) >= uint(f.rows))
+				continue;
+
+			const float w = cpoints[i].edgew;
+			F_x += w * _resample(f, pt.x, pt.y) * _resample(f, pt.x, pt.y);
+		}
+		return F_x;
+	}
+	int _edgeupdate(Optimizer::PoseData& pose, const Matx33f& K, const std::vector<CPoint>& cpoints, float eps)
+	{
+		Mat1f f = gradf;
+		Mat3f rgbImage(gradf.rows, gradf.cols);
+		Mat img1 = originimg.clone();
+
+		// 将灰度图的每个像素复制到RGB图像的三个通道
+		for (int i = 0; i < gradf.rows; ++i) {
+			for (int j = 0; j < gradf.cols; ++j) {
+				float grayValue = gradf(i, j); // 获取灰度图中的像素值
+				// 将灰度值赋给RGB图像的对应位置的R、G、B三个通道
+				rgbImage(i, j)[0] = grayValue; // B
+				rgbImage(i, j)[1] = grayValue; // G
+				rgbImage(i, j)[2] = grayValue; // R
+			}
+		}
+		Mat3b rgbImage8bit;
+		rgbImage.convertTo(rgbImage8bit, CV_8U, 255.0);
+		//imwrite("D:\\RBOT_dataset\\can\\gradf.jpg", rgbImage8bit);
+
+		Mat1f dfx, dfy;
+		cv::Sobel(f, dfx, CV_32F, 1, 0);
+		cv::Sobel(f, dfy, CV_32F, 0, 1);
+
+		auto _resample = [](const Mat1f& f, float x, float y) {
+			int xi = int(x), yi = int(y);
+			if (uint(xi) < uint(f.cols - 1) && uint(yi) < uint(f.rows - 1))
+			{
+				const float* p = f.ptr<float>(yi, xi);
+				int stride = stepC(f);
+				float wx = x - xi, wy = y - yi;
+				float a = p[0] + wx * (p[1] - p[0]);
+				float b = p[stride] + wx * (p[stride + 1] - p[stride]);
+				return a + wy * (b - a);
+			}
+#define _clip(v, vmax) (v<0? 0 : v>vmax? vmax : v)
+			return f(_clip(yi, f.rows - 1), _clip(xi, f.cols - 1));
+#undef _clip
+		};
+
+		const Matx33f R = pose.R;
+		const Point3f t = pose.t;
+		int npt = cpoints.size();
+
+		const float fx = K(0, 0), fy = K(1, 1);
+
+		Matx66f JJ = Matx66f::zeros();
+		Vec6f J(0, 0, 0, 0, 0, 0);
+
+		for (size_t i = 0; i < cpoints.size(); ++i)
+		{
+			//	continue;
+			const Point3f Q = R * cpoints[i].center + t;
+			const Point3f q = K * Q;
+
+			const float X = Q.x, Y = Q.y, Z = Q.z;
+
+			const float a = fx / Z, b = -fx * X / (Z * Z), c = fy / Z, d = -fy * Y / (Z * Z);
+
+			Point2f pt(q.x / q.z, q.y / q.z);
+
+			//const int x = int(q.x + 0.5), y = int(q.y + 0.5);
+			if (uint(int(pt.x + 0.5)) >= uint(f.cols) || uint(int(pt.y + 0.5)) >= uint(f.rows))
+				continue;
+
+			circle(rgbImage8bit, pt, 1, Scalar(255, 255, 0), -1);
+			circle(img1, pt, 1, Scalar(255, 255, 0), -1);
+
+			//Vec2f nx(dfx(y, x), dfy(y, x));
+			Vec2f nx(_resample(dfx, pt.x, pt.y), _resample(dfy, pt.x, pt.y));
+			nx = normalize(nx);
+
+
+			Vec3f n_dq_dQ(nx[0] * a, nx[1] * c, nx[0] * b + nx[1] * d);
+
+			auto dt = n_dq_dQ.t() * R;
+			auto dR = cpoints[i].center.cross(Vec3f(dt.val[0], dt.val[1], dt.val[2]));
+
+			Vec6f j(dt.val[0], dt.val[1], dt.val[2], dR.x, dR.y, dR.z);
+
+
+			const float w = cpoints[i].edgew;
+			const float wf = (w * _resample(f, pt.x, pt.y));
+			//if (fi == 4) {
+			//	cout << "ptsimg" << endl;
+			//	//cout << w << endl;
+			//	cout << _resample(f, pt.x, pt.y) << endl;
+			//	//imshow("ptsimg", rgbImage8bit);
+			//	//waitKey(0);
+			//}
+			
+			prev += w * _resample(f, pt.x, pt.y) * _resample(f, pt.x, pt.y);
+
+			J += wf * j;
+
+			JJ += w * j * j.t();
+		}
+
+		/*imwrite("D:\\RBOT_dataset\\can\\gradfpts.jpg", rgbImage8bit);
+		imwrite("D:\\RBOT_dataset\\can\\imgpts.jpg", img1);*/
+
+		const float lambda = 100000000.f * npt / 200.f;
+
+		for (int i = 0; i < 3; ++i)
+			JJ(i, i) += lambda * 1000.f;
+
+		for (int i = 3; i < 6; ++i)
+			JJ(i, i) += lambda;
+
+		Vec6f p;// = -JJ.inv() * J;
+		if (solve(JJ, -J, p))
+		{
+			cv::Vec3f dt(p[0], p[1], p[2]);
+			cv::Vec3f rvec(p[3], p[4], p[5]);
+			Matx33f dR;
+			cv::Rodrigues(rvec, dR);
+
+			pose.t = pose.R * dt + pose.t;
+			pose.R = pose.R * dR;
+
+			if (Fx(pose, K, cpoints) > prev)return 0;
+
+			float diff = p.dot(p);
+			//printf("diff=%f\n", sqrt(diff));
+
+			return diff < eps* eps ? 0 : 1;
+		}
+
+	}
+	bool edgeupdate(Optimizer::PoseData& pose, const Matx33f& K, const std::vector<CPoint>& cpoints, int maxItrs, float eps)
+	{
+		/*for (int itr = 0; itr < maxItrs; ++itr) {
+			if (this->_edgeupdate(pose, K, cpoints, eps) <= 0)
+				return false;
+		}*/
+		for (int itr = 0; itr < maxItrs; ++itr) {
+			if (this->_edgeupdate(pose, K, cpoints, eps) <= 0)
+				return false;
+			
+			prev = 0.f;
+		}
+		/*for (int itr = 0; itr < maxItrs; ++itr) {
+			float prev = Fx(pose, K, cpoints);
+			this->_edgeupdate(pose, K, cpoints, eps);
+			if (Fx(pose, K, cpoints) > prev)return false;
+		}*/
+		return true;
+	}
+};
 
 struct Templates
 {
 	Point3f               modelCenter;
 	std::vector<DView>   views;
 	ViewIndex             viewIndex;
+	CVRModel              _model;
 	enum { N_LAYERS = 2 };
 	Mat2f         _grad;
+	Mat img0;
 	DEFINE_BFS_IO_2(Templates, modelCenter, views)
 
 public:
@@ -786,10 +1224,9 @@ public:
 	}
 
 public:
-	void initgrad(const Mat& img);
-	float getScore(const Pose& pose, const Matx33f& K, float dotT = 0.9f);
 	void build(CVRModel& model);
-
+	int _edgeupdate(Optimizer::PoseData& pose, const Matx33f& K, const std::vector<CPoint>& cpoints, Mat1f gradf, float eps);
+	bool edgeupdate(Optimizer::PoseData& pose, const Matx33f& K, const std::vector<CPoint>& cpoints, Mat1f gradf, float eps);
 	void save(const std::string& file)
 	{
 		ff::OBFStream os(file);
@@ -824,13 +1261,93 @@ public:
 	{
 		return _getNearestView(this->_getViewDir(R, t));
 	}
-
-	float pro(const Matx33f& K, Pose& pose, const Mat1f& curProb, const Mat&img, float thetaT, float angleMax)
+	void realrender(Pose pose, const Matx33f& K, vector<IPoint>& innerPoints, Mat img)
 	{
-		return this->pro1(K, pose, curProb, img, thetaT, angleMax);
+		float eyeDist = 0.8f;
+		float fscale = 2.5f;
+		Size  viewSize(640, 512);
+		auto center = _model.getCenter();
+		auto sizeBB = _model.getSizeBB();
+		float maxBBSize = __max(sizeBB[0], __max(sizeBB[1], sizeBB[2]));
+		CVRender render(_model);
+
+		Vec3f viewDir = _getViewDir(pose.R, pose.t);
+		auto eyePos = center + viewDir * eyeDist;
+
+		CVRMats mats;
+		/*mats.mModel = cvrm::lookat(eyePos[0], eyePos[1], eyePos[2], center[0], center[1], center[2], 0.1f, 1.1f, 0.1f);
+		mats.mProjection = cvrm::perspective(viewSize.height * fscale, viewSize, __max(0.01, eyeDist - maxBBSize), eyeDist + maxBBSize);*/
+		mats.mModel = cvrm::fromR33T(pose.R, pose.t);
+		mats.mProjection = cvrm::fromK(K, viewSize, 0.1, 3000);
+
+
+		auto rr = render.exec(mats, viewSize);
+		Mat1b mask = rr.getMaskFromDepth();
+		imshow("mask", mask);
+		Rect roi = cv::get_mask_roi(DWHS(mask), 127);
+		Mat dimg = img.clone();
+		{
+			Mat t;
+			cv::addWeighted(dimg(roi), 0.6, rr.img(roi), 0.4, 0, t);
+			t.copyTo(dimg(roi), mask(roi));
+			//rr.img(roi).copyTo(dimg(roi), mask(roi));
+		}
+		{
+			std::vector<std::vector<Point> > cont;
+			cv::findContours(mask, cont, CV_RETR_LIST, CV_CHAIN_APPROX_NONE);
+			drawContours(dimg, cont, -1, Scalar(255, 0, 255), 1, CV_AA);
+			//drawContours(dimg, cont, -1, Scalar(255, 0, 0), 2, CV_AA);
+		}
+		//imshow("dimg0", dimg);
+		//waitKey(0);
+		InnerSampler::sample(innerPoints, rr, 200);
+	}
+	void realrender(Pose pose, const Matx33f& K, vector<CPoint>& innerPoints, Mat img, bool output = false)
+	{
+
+		Size  viewSize(640, 512);
+
+		CVRender render(_model);
+		CVRMats mats;
+
+		mats.mModel = cvrm::fromR33T(pose.R, pose.t);
+		mats.mProjection = cvrm::fromK(K, viewSize, 0.1, 3000);
+
+		
+		auto rr = render.exec(mats, viewSize);
+
+		if (output) {
+			Mat1b mask = rr.getMaskFromDepth();
+			//imshow("mask", mask);
+			Rect roi = cv::get_mask_roi(DWHS(mask), 127);
+			Mat dimg = img.clone();
+			{
+				Mat t;
+				cv::addWeighted(dimg(roi), 0.6, rr.img(roi), 0.4, 0, t);
+				t.copyTo(dimg(roi), mask(roi));
+				//rr.img(roi).copyTo(dimg(roi), mask(roi));
+			}
+			{
+				std::vector<std::vector<Point> > cont;
+				cv::findContours(mask, cont, CV_RETR_LIST, CV_CHAIN_APPROX_NONE);
+				drawContours(dimg, cont, -1, Scalar(255, 0, 255), 1, CV_AA);
+				//drawContours(dimg, cont, -1, Scalar(255, 0, 0), 2, CV_AA);
+			}
+			//imshow("dimg0", dimg);
+			/*waitKey(0);
+			imwrite("D:\\RBOT_dataset\\can\\imgori.png", dimg);*/
+		}
+		
+		EdgeSampler::sample(innerPoints, rr, 200);
+
 	}
 
-	float pro1(const Matx33f& K, Pose& pose, const Mat1f& curProb, const Mat& img, float thetaT, float angleMax);
+	float pro(const Matx33f& K, Pose& pose, const Mat1f& curProb, const Mat& img, float thetaT, float errT, int fi, Pose gtpose)
+	{
+		return this->pro1(K, pose, curProb, img, thetaT, errT, fi, gtpose);
+	}
+
+	float pro1(const Matx33f& K, Pose& pose, const Mat1f& curProb, const Mat& img, float thetaT, float errT, int fi, Pose gtpose);
 };
 
 
@@ -879,61 +1396,36 @@ public:
 
 };
 
-inline void Templates::initgrad(const Mat& img)
+void projimg(const Matx33f K, Pose pose, vector<CPoint>cpoints, Mat img, int step = 1)
 {
-	Mat1b gray = cv::convertBGRChannels(img, 1);
+	Matx33f R = pose.R;
+	Point3f t = pose.t;
+	int npt = cpoints.size();
+	const float fx = K(0, 0), fy = K(1, 1);
 
-	Mat1f dx, dy;
-
-	for (int l = 0; l < N_LAYERS; ++l)
+	for (int i = 0; i < cpoints.size(); i += step)
 	{
-		Mat1f ldx, ldy;
-		cv::Sobel(gray, ldx, CV_32F, 1, 0);
-		cv::Sobel(gray, ldy, CV_32F, 0, 1);
+		//	continue;
+		const Point3f Q = R * cpoints[i].center + t;
+		const Point3f q = K * Q;
 
-		if (l != 0)
-		{
-			dx += imscale(ldx, img.size(), INTER_LINEAR);
-			dy += imscale(ldy, img.size(), INTER_LINEAR);
-		}
-		else
-		{
-			dx = ldx; dy = ldy;
-		}
-		if (l != N_LAYERS - 1)
-			gray = imscale(gray, 0.5);
-	}
-	_grad = cv::mergeChannels(dx, dy);
-}
-inline float Templates::getScore(const Pose& pose, const Matx33f& K, float dotT)
-{
-	std::vector<Point2f>  points, normals;
-	getProjectedContours(K, pose, points, &normals);
+		const float X = Q.x, Y = Q.y, Z = Q.z;
 
-	float wsum = 1e-6, score = 0;
-	int   nmatch = 0;
-	for (size_t i = 0; i < points.size(); ++i)
-	{
-		int x = int(points[i].x + 0.5f), y = int(points[i].y + 0.5f);
-		if (uint(x) < uint(_grad.cols) && uint(y) < uint(_grad.rows))
-		{
-			const float* g = _grad.ptr<float>(y, x);
-			float w = sqrt(g[0] * g[0] + g[1] * g[1]) + 1e-6f;
-			float dot = (g[0] * normals[i].x + g[1] * normals[i].y) / w;
-			dot = fabs(dot);
-			if (dot > dotT)
-			{
-				score += dot * w;
-				wsum += w;
-				nmatch++;
-			}
-		}
+		const float a = fx / Z, b = -fx * X / (Z * Z), c = fy / Z, d = -fy * Y / (Z * Z);
+
+		Point2f pt(q.x / q.z, q.y / q.z);
+
+		//const int x = int(q.x + 0.5), y = int(q.y + 0.5);
+		if (uint(int(pt.x + 0.5)) >= uint(img.cols) || uint(int(pt.y + 0.5)) >= uint(img.rows))
+			continue;
+		circle(img, pt, 1, Scalar(255, 0, 255), -1);
 	}
-	return score / wsum * (float(nmatch) / float(points.size()));
+	//imshow("img", img);
+	//waitKey(0);
 }
-inline float Templates::pro1(const Matx33f& K, Pose& pose, const Mat1f& curProb, const Mat& img, float thetaT, float angleMax)
+
+inline float Templates::pro1(const Matx33f& K, Pose& pose, const Mat1f& curProb, const Mat& img, float thetaT, float errT, int fi, Pose gtpose)
 {
-	initgrad(img);
 	Rect curROI;
 	int curView = this->_getNearestView(pose.R, pose.t);
 	{
@@ -965,9 +1457,36 @@ inline float Templates::pro1(const Matx33f& K, Pose& pose, const Mat1f& curProb,
 			break;
 	}
 
-	//float errMin = dfr.calcError(dpose, K, this->views[curView].contourPoints3d, alpha);
-	float evaluate = getScore(dpose, K);
-	if (evaluate < angleMax)
+	/******************************************************************************/
+
+	//std::ofstream file("pose_matrix2.txt", std::ios::app); // std::ios::app 用于追加到文件末尾
+
+	//// 设置输出格式
+	//file << std::fixed << std::setprecision(2);
+
+	//// 写入矩阵
+	//file << "init matrix:" << endl;
+	//file << "R:" << endl;
+	//for (int i = 0; i < 3; ++i) {
+	//	for (int j = 0; j < 3; ++j) {
+	//		file << std::setw(6) << dpose.R(i, j) << " ";
+	//	}
+	//	file << std::endl;
+	//}
+	//file << "t:" << endl;
+	//for (int i = 0; i < 3; i++) {
+	//	file << std::setw(6) << dpose.t[i] << " ";
+	//}
+	//file << std::endl;
+
+	//// 关闭文件
+	//file.close();
+
+	/****************************************************************************************/
+
+
+	float errMin = dfr.calcError(dpose, K, this->views[curView].contourPoints3d, alpha);
+	if (errMin > errT)
 	{
 		const auto R0 = dpose.R;
 
@@ -1033,14 +1552,13 @@ inline float Templates::pro1(const Matx33f& K, Pose& pose, const Mat1f& curProb,
 			}
 			{
 				curView = this->_getNearestView(dposex.R, dposex.t);
-				//float err = dfr.calcError(dposex, K, this->views[curView].contourPoints3d, alpha);
-				float angle = getScore(dposex, K);
-				if (angle > evaluate)
+				float err = dfr.calcError(dposex, K, this->views[curView].contourPoints3d, alpha);
+				if (err < errMin)
 				{
-					evaluate = angle;
+					errMin = err;
 					dpose = dposex;
 				}
-				if (angleMax < evaluate)
+				if (errMin < errT)
 					break;
 			}
 		}
@@ -1052,12 +1570,39 @@ inline float Templates::pro1(const Matx33f& K, Pose& pose, const Mat1f& curProb,
 		if (!dfr.update(dpose, K, this->views[curView].contourPoints3d, innerItrs, alpha, eps))
 			break;
 	}
-
 	pose = dpose;
+	EdgeResponse edger(img, fi);
+	float errR = get_errorR(dpose.R, gtpose.R);
+	float errt = get_errort(dpose.t, gtpose.t);
+	vector<CPoint>Points3d;
+	realrender(dpose, K, Points3d, img, 1);
 
-	return evaluate;
+	for (int itr = 0; itr < outerItrs; itr++)
+	{
+		
+		//curView = this->_getNearestView(dpose.R, dpose.t);
+		/*if (!edger.edgeupdate(dpose, K, this->views[curView].innerPoints3d, eps))
+			break;*/
+		vector<CPoint>innerPoints3d;
+		realrender(dpose, K, innerPoints3d, img);
+		if (fi == 4) {
+			int a = 1;
+			//waitKey(0);
+		}
+		if (!edger.edgeupdate(dpose, K, innerPoints3d, 10, 0))
+			break;
+		//cout << "************************************************************************" << endl;
+		errR = get_errorR(dpose.R, gtpose.R);
+		errt = get_errort(dpose.t, gtpose.t);
+	}
+	errR = get_errorR(dpose.R, gtpose.R);
+	errt = get_errort(dpose.t, gtpose.t);
+	pose = dpose;
+	/*curView = this->_getNearestView(dpose.R, dpose.t);
+	projimg(K, dpose, this->views[curView].contourPoints3d, img.clone(), 2);*/
+
+	return errMin;
 }
-
 
 inline void Templates::build(CVRModel& model)
 {
@@ -1072,6 +1617,7 @@ inline void Templates::build(CVRModel& model)
 	Size  viewSize(2000, 2000);
 
 	this->modelCenter = center;
+	this->_model = model;
 
 	std::vector<DView> dviews;
 	dviews.reserve(viewDirs.size());
@@ -1112,8 +1658,8 @@ inline void Templates::build(CVRModel& model)
 
 			Vec3f t;
 			cvrm::decomposeRT(mats.mModel, dv.R, t);
-
 			EdgeSampler::sample(dv.contourPoints3d, rr, 200);
+			//InnerSampler::sample(dv.innerPoints3d, rr, 200);
 		}
 	}
 	this->views.swap(dviews);
@@ -1147,7 +1693,10 @@ public:
 
 		auto tfile = ff::ReplacePathElem(modelFile, "tm033", ff::RPE_FILE_EXTENTION); //033(ECCV submit)
 		if (!forceRebuild && ff::pathExist(tfile))
+		{
 			templ.load(tfile);
+			templ._model = this->model;
+		}
 		else
 		{
 			templ.build(this->model);
@@ -1208,6 +1757,17 @@ public:
 	{
 		_tab.resize(TAB_SIZE);
 		_dtab.resize(TAB_SIZE);
+	}
+	void clear()
+	{
+		for (int i = 0; i < TAB_SIZE; ++i)
+		{
+			for (int j = 0; j < 2; ++j)
+			{
+				_tab[i].nbf[j] = 0;
+				_dtab[i].nbf[j] = 0;
+			}
+		}
 	}
 	void update(Object& obj, const Mat3b& img, const Pose& pose, const Matx33f& K, float learningRate)
 	{
@@ -1298,6 +1858,7 @@ class Tracker
 	Object  _obj;
 	ColorHistogram _colorHistogram;
 	bool    _isLocalTracking = false;
+	int _fi;
 
 	struct FrameInfo
 	{
@@ -1335,6 +1896,7 @@ public:
 		_mProj = cvrm::fromK(K, img.size(), 0.1, 3);
 		_K = K;
 
+		_colorHistogram.clear();
 		_colorHistogram.update(_obj, _cur.img, _cur.pose, _K, 1.f);
 	}
 	virtual void startUpdate(const Mat& img, int fi, Pose gtPose = Pose())
@@ -1347,6 +1909,7 @@ public:
 				_frameInfo.pop_front();
 		}
 
+		_fi = fi;
 		_prev = _cur;
 		_cur.img = img;
 		_cur.colorProb = _colorHistogram.getProb(_cur.img);
@@ -1366,11 +1929,11 @@ public:
 		return tmp[n / 2];
 	}
 
-	virtual float update(Pose& pose)
+	virtual float update(Pose& pose, Pose gtpose)
 	{
 		_cur.pose = _scalePose(pose);
 
-		float thetaT = CV_PI / 8, errT = 0.90f; //default values used for only the first 2 frames
+		float thetaT = CV_PI / 8, errT = 1.f; //default values used for only the first 2 frames
 
 		if (!_frameInfo.empty())
 		{//estimate from previous frames
@@ -1378,7 +1941,7 @@ public:
 			errT = _getMedianOfLastN(_frameInfo, 15, [](const FrameInfo& v) {return v.err; });
 		}
 
-		_cur.err = _obj.templ.pro(_K, _cur.pose, _cur.colorProb, _cur.img, thetaT, _isLocalTracking ? FLT_MAX : errT);
+		_cur.err = _obj.templ.pro(_K, _cur.pose, _cur.colorProb, _cur.img, thetaT, _isLocalTracking ? FLT_MAX : errT, _fi, gtpose);
 		pose = _descalePose(_cur.pose);
 		return _cur.err;
 	}

@@ -1,8 +1,8 @@
 ﻿  eval_rbot.cpp
 MSVCRT.lib(initializers.obj) : warning LNK4098: 默认库“libcmt.lib”与其他库的使用冲突；请使用 /NODEFAULTLIB:library
   正在生成代码
-  72 of 4642 functions ( 1.6%) were compiled, the rest were copied from previous compilation.
-    4 functions were new in current compilation
-    132 functions had inline decision re-evaluated but remain unchanged
+  238 of 4948 functions ( 4.8%) were compiled, the rest were copied from previous compilation.
+    8 functions were new in current compilation
+    177 functions had inline decision re-evaluated but remain unchanged
   已完成代码的生成
   ECCV.vcxproj -> E:\ZJR\summer\MultiObj\x64\Release\ECCV.exe

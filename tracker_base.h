@@ -54,7 +54,7 @@ public:
 
 	virtual void startUpdate(const Mat& img, int fi, Pose gtPose = Pose()) = 0;
 
-	virtual float update(Pose& pose) = 0;
+	virtual float update(Pose& pose, Pose gtpose) = 0;
 
 	virtual void endUpdate(const Pose& pose) = 0;
 
